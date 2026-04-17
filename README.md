@@ -1,78 +1,59 @@
-# 张雪峰视角 AI 智能体 (ZhangXuefeng LLM Agent)
+# 张雪峰视角 AI 智能体 (ZhangXuefeng LLM Agent) V2.0
 
 本项目是一个成熟的企业级 AI 智能体系统，通过搭载特制的系统提示词与思维框架（Skill），化身“张雪峰”为人解答报考、升学、职场及人生规划问题。
 
-本项目兼具优雅的现代前端界面与稳定高可用的后端架构，支持跨设备访问与平滑的流式输出，并且针对本地与云端模型实现了无缝容灾切换。
+随着 V2.0 的发布，系统已从原本单纯的“问答机器人”跨世代跃升为了具备**工具链调用（Tool Calling）**与**全网自运转检索**的**高级智能体（Agent）**架构。
 
-## ✨ 核心特性 / Features
+## ✨ 核心特性升级 / Features 2.0
 
-- **🎓 特调人格引擎**：深度集成《张雪峰视角》思维模板（SKILL.md），不提供“政治正确”的废话，只提供“毒舌但极其现实考量”的分析机制。
-- **🚀 高可用容灾双活部署 (Fallback)**：
-  - 支持 **Ollama** 本地开源模型与 **阿里云百炼** (Bailian) 等云端闭源模型双后端。
-  - **无缝灾备熔断**：配置主引擎后，若突发主引擎崩溃断网或显存不足，LangChain 驱动层会在极短时间内静默降级切换至备用引擎，确保前端用户连贯无感应继续对话。
+- **🤖 ReAct Agent 架构**：彻底抛弃封闭的单纯 LLM 链式问答，底层升级为 LangChain Agent 原生架构，赋予大模型自主反思与调用工具链的逻辑决策能力。
+- **🌐 实时网页数据检索引擎 (Tavily Search)**：
+  - **动态真值核验**：每当面对像某年某高校分数线、实时录取政策、突发新闻等时效性问题时，AI 不再“瞎编”，而是主动执行搜索引擎指令。
+  - **Tavily 专线护航**：通过企业级的 Tavily Search API，直接穿透反爬虫体系，一次调用即可在数秒内整理多个权威页面的净数据结果反哺给大模型。
+  - **检索动效呈现**：完全打通的 Event-Stream，前端完美渲染类似人在操作电脑获取信息的实时动态 UI（`🔍 [老张正在全网检索...]`）。
+- **👑 千亿级重装主力大模型**：主节点直接接管为阿里云百炼底座上的顶级大模型 `qwen3.5-397b-a17b`，确保在海量互联网嘈杂数据提取下具备恐怖的语义合成与逻辑抗压能力。
+- **🚀 固态高可用容灾配置 (Fallback)**：
+  - **常态化双保底机制**：为防止主大模型或网络连接闪断，底层框架设置了静态逃生口。只要遇到异常挂掉报错，请求将在一瞬间顺滑下放接管到备选云端模型（`qwen3.6-35b-a3b`）代为作答，用户全过程享受无感响应。
 - **💾 实体级流式记忆网格 (SQLite Persistence)**：
-  - 弃用传统的局限性内存对话状态，实现了本地轻量化 SQLite 持久存储。
-  - Web 客户端不论如何刷新（F5），甚至遭遇服务器发版重启及闪退，所有历史多路并发对话上下文均100%瞬间复活重载保障。
-- **⚡ 丝滑极简响应式 Web 界面**：
-  - 不依赖庞大的 Node.js React/Vue，开箱即用的原生 JS 轻量化深色主题卡片式 UI 界面。
-  - 实现 Server-Sent Events (SSE) 协议交互原生流式打字机效果。
-- **🛡️ 企业级 API 与日志**：
-  - **API 限流与鉴权锁**：具备完整的 .env 隔离机制以及 `API_SECRET_KEY` 接口防护层。
-  - **诊断级本地溯源**：配备带有 Request 健康探针与本地文件化落盘系统（`/data/app.log`），方便监控平台（如 Prometheus/Grafana）接入追踪错误路由。
-- **💻 极致体验兼容**：已通过底层 Windows 系统 GBK / 宽字节乱码的适配清理层，避免任何解码奔溃。
+  - 拥有极其丝滑的 Web 前端逻辑控制，彻底解决了浏览器刷新遗留缓存覆盖的问题。
+  - 点击左侧多对话树干流通道热切换历史记录，随时接续长达一天的长途报考交谈。
 
 ---
 
-## 🛠️ 技术栈 / Tech Stack
+## 🛠️ 技术栈核心 / Tech Stack
 
-- **后端架构**： FastAPI, Uvicorn, LangChain (`langchain-ollama`, `langchain-openai`), Pydantic
-- **存储方案**： 内置 Sqlite3
-- **环境隔离**： python-dotenv (`.env`)
-- **包管理器**： 超快 `uv` 生态
-- **大模引擎**： Qwen3:8b (本地) / Qwen-turbo (云端百炼)
-
----
-
-## 🗂 代码目录结构
-```text
-.
-├── .agents/skills/      # 核心人格 prompt 定义系统文件
-├── data/                # [运行时目录] 系统 SQLite 存储数据与 Logs 日志 
-├── frontend/            # 前端 HTML/CSS/JS 完全独立部署层
-│   ├── index.html       # 核心对话页
-│   ├── app.js           # 处理流式、上下文及 localStorage
-│   └── style.css        # 全局响应式样式表
-├── .env.example         # 关键环境变量复制模板文件
-├── pyproject.toml / uv.lock # 安装依赖锁配置
-├── zhangxuefeng_api.py  # 企业级全异步微型后端网关主程序
-└── zhangxuefeng_agent.py# (备用) 终端黑框版本启动脚本
-```
+- **调度大脑**：LangChain Classic Agents (`create_tool_calling_agent`)
+- **信息雷达**：Tavily Search 工具集
+- **引擎核**：Qwen3.5-397b-a17b (Bailian 云端主线) / Qwen3.6-35b-a3b (备灾支线)
+- **基建体系**：FastAPI 后端微服务框架、原生 HTML/JS 异步前端渲染、uv 包与依赖级管理。
 
 ---
 
 ## 🚀 部署指南 / Getting Started
 
-### 1. 配置项目环境
-首先需要利用 `uv.lock` 进行依赖的同步更新并新建虚拟配置模板：
+### 1. 完善并挂载环境变量
+利用 `uv` 进行零痛点自动拉取所需配置的模板系统：
 ```bash
 cp .env.example .env
 ```
-随后编辑 `.env` 设置你的配置参数：
-- 设置 `BACKEND` 调整是使用本地还是百炼云端。
-- 保证填写由百炼申请到的 `DASHSCOPE_API_KEY` 以开启你的高可用灾备底座。
-- 如果暴露在外网，请务必设置包含加密字符串的 `API_SECRET_KEY`。
+随后编辑你的 `.env`，确保以下两大关键齿轮正常嵌合运转：
+- 填写阿里云百炼的：`DASHSCOPE_API_KEY=sk-xxxx`
+- 填写前往 Tavily (每月提供 1000 次免费 Agent 查询额度) 拿到的：`TAVILY_API_KEY=tvly-xxxx`
 
-### 2. 启动企业后端 API 与托管站点
-只需要一条底层命令：
+### 2. 秒启动服务 API 接口
+只需要一条带有魔法依赖隔离系统（uv）的命令：
 ```bash
 uv run python zhangxuefeng_api.py
 ```
-> **访问信息**：
-> 默认前端页面：[http://localhost:8000/app](http://localhost:8000/app)
-> API 开发者文档：[http://localhost:8000/docs](http://localhost:8000/docs)
-> Kubernetes 探活接口：[http://localhost:8000/health](http://localhost:8000/health)
+*(你将会看到 0 毫秒级的响应提示你：“已成功挂载 Tavily 强力搜索网关...”)*
+
+> **入口矩阵**：
+> 主工作站台：[http://localhost:8000/app](http://localhost:8000/app)
+> OpenAPI 调试台：[http://localhost:8000/docs](http://localhost:8000/docs)
+> 健康巡检心跳：[http://localhost:8000/health](http://localhost:8000/health)
 
 ---
 
-## 📅 下游改进路线 (Roadmap v2.0)
-- [ ] **接入网页实时检索引擎 (WebSearch Agent)**：未来计划通过 Tavily / DuckDuckGo 将纯对话系统拔升到真正的智能体维度，使大模型拥有获取全网近三天内最新分数线、最新资讯进行深度规划的能力。
+## 📅 下游改进路线 (Roadmap v3.0)
+- [ ] **Agentic RAG 私有知识库**：未来可以将张雪峰曾经写过的报考手册和独家视频文档（PDF/Markdown 等形式）切片为向量库，使其在通用检索之外增加“内部秘籍”查询技能项。
+- [ ] **微信 / 飞书 宿主应用接入**：通过 FastApi 回调进行二次开发，将这个有独立记忆和反思搜索能力的 Agent 变成公众号后台客服机器人。
