@@ -159,12 +159,32 @@ function createMessageElement(role, content) {
     const div = document.createElement('div');
     div.className = `message ${role}`;
     const avatarText = role === 'ai' ? '峰' : '👤';
+    
+    let displayContent = '';
+    if (role === 'ai') {
+        displayContent = renderMarkdown(content);
+    } else {
+        // 用户消息：检查是否包含附件解析标记
+        if (content.startsWith('【以下为用户提供的附件资料：')) {
+            const match = content.match(/【以下为用户提供的附件资料：(.*?)】\n---\n([\s\S]*?)\n---\n\n【基于以上资料，我要问的是】：\n([\s\S]*)/);
+            if (match) {
+                const filename = match[1];
+                const realQuestion = match[3];
+                // 渲染为简洁模式，带个回看标记（因为没有 URL 信息，这里作为静态展示标出的文件名）
+                const linkHtml = `<div style="color:#4a9eff; background:rgba(74,158,255,0.1); padding:2px 8px; border-radius:4px; font-size:13px; margin-bottom:4px; display:inline-flex; align-items:center; gap:3px;">📎 ${escapeHtml(filename)}</div>`;
+                displayContent = linkHtml + (realQuestion.trim() ? '<br>' + escapeHtml(realQuestion.trim()) : '');
+            } else {
+                displayContent = escapeHtml(content);
+            }
+        } else {
+            displayContent = escapeHtml(content);
+        }
+    }
+
     div.innerHTML = `
         <div class="message-avatar">${avatarText}</div>
         <div class="message-content">
-            <div class="message-bubble">
-                ${role === 'ai' ? renderMarkdown(content) : escapeHtml(content)}
-            </div>
+            <div class="message-bubble">${displayContent}</div>
         </div>
     `;
     return div;
