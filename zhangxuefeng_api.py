@@ -13,14 +13,16 @@ import json
 import sqlite3
 import argparse
 import logging
+import datetime
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Security, Request, Depends
+from fastapi import FastAPI, HTTPException, Security, Request, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -221,9 +223,12 @@ def build_chain(llm, system_prompt: str):
             "\n如果未提供工具，则尽力依靠常识作答。"
         )
 
+    # 添加现实世界绝对时间参考
+    time_anchor = "\n\n【现实世界锚点】：当前系统真实北京时间是 {current_time}。如果用户问现在的时间或日期，或者推断年份，以此为绝对物理准绳，不要有任何怀疑和幻觉！"
+    
     # Agent 需要特定的 Scratchpad 以存放中间步骤
     prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
+        ("system", system_prompt + time_anchor),
         MessagesPlaceholder(variable_name="history"),
         ("user", "{input}"),
         MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -240,7 +245,7 @@ def build_chain(llm, system_prompt: str):
     # 如果没配置 Tavily 密钥或者失败，这只是一个普通链
     # 但如果是普通链，我们需要去掉 agent_scratchpad 参数才能正常跑
     prompt_safe = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
+        ("system", system_prompt + time_anchor),
         MessagesPlaceholder(variable_name="history"),
         ("user", "{input}"),
     ])
@@ -251,7 +256,7 @@ def build_chain(llm, system_prompt: str):
 # 3. 请求/响应模型 (加强验证)
 # ============================================================
 class ChatRequest(BaseModel):
-    message: str = Field(..., max_length=2000, description="用户消息")
+    message: str = Field(..., max_length=150000, description="用户消息（包含附件）")
     session_id: Optional[str] = Field(None, pattern=r"^[a-zA-Z0-9_-]{1,50}$", description="会话ID，限50个字母数字或横线")
     stream: bool = Field(False, description="是否使用流式输出(SSE)")
 
@@ -368,6 +373,14 @@ app = FastAPI(title="placeholder")
 # 5. API 路由
 # ============================================================
 def register_routes(app: FastAPI):
+    
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        logger.error(f"422 参数校验拦截 | 请求体不合法: {exc.errors()} | Body: {exc.body}")
+        return JSONResponse(
+            status_code=422,
+            content={"detail": exc.errors(), "body": str(exc.body)},
+        )
 
     @app.get("/health", response_model=ServerInfo, tags=["系统"])
     async def health_check():
@@ -408,6 +421,7 @@ def register_routes(app: FastAPI):
             result = await _chain.ainvoke({
                 "input": req.message,
                 "history": history,
+                "current_time": datetime.datetime.now().strftime("%Y年%m月%d日 %A"),
             })
             
             # Agent返回的是dict带output，普通链返回的是AIMessage
@@ -473,6 +487,60 @@ def register_routes(app: FastAPI):
         _session_manager.clear_all()
         return {"message": "已清空所有会话"}
 
+    @app.post("/upload", tags=["文件处理"])
+    async def upload_file(file: UploadFile = File(...), authorized: bool = Depends(verify_api_key)):
+        """万能文档解析，基于微软 MarkitDown。持久化存储原始文件供前端回看。"""
+        from markitdown import MarkItDown
+        from openai import OpenAI
+        import tempfile
+        try:
+            suffix = Path(file.filename).suffix
+            is_image = suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]
+            
+            # 持久化保存原始文件到 data/uploads/
+            uploads_dir = Path("./data/uploads")
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            file_id = f"{uuid.uuid4().hex[:12]}{suffix}"
+            saved_path = uploads_dir / file_id
+            content = await file.read()
+            saved_path.write_bytes(content)
+            
+            # 同时写临时文件供 MarkItDown 解析
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+
+            # 如果是图片格式，借助 OpenAI 客户端外壳路由到百炼视觉大模型
+            if is_image:
+                client = OpenAI(
+                    api_key=os.getenv("DASHSCOPE_API_KEY"),
+                    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+                )
+                md = MarkItDown(llm_client=client, llm_model="qwen3-vl-flash-2026-01-22")
+            else:
+                md = MarkItDown()
+
+            result = md.convert(tmp_path)
+            os.remove(tmp_path)
+            
+            text_context = result.text_content
+            if len(text_context) > 10000:
+                text_context = text_context[:10000] + "\n\n...(由于内容过大，已自动截断尾部)"
+
+            file_url = f"/uploads/{file_id}"
+            return {"filename": file.filename, "markdown": text_context, "file_url": file_url}
+        except Exception as e:
+            logger.error(f"文件解析失败: {e}")
+            raise HTTPException(status_code=500, detail=f"无法解析文件内容: {str(e)}")
+
+    @app.get("/uploads/{file_id}", tags=["文件处理"])
+    async def download_file(file_id: str):
+        """提供已上传文件的下载/预览"""
+        file_path = Path("./data/uploads") / file_id
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        return FileResponse(file_path, filename=file_id)
+
 
 async def _stream_response(message: str, session_id: str, history: list):
     full_response = ""
@@ -480,8 +548,11 @@ async def _stream_response(message: str, session_id: str, history: list):
 
     try:
         # 使用异步事件流 astream_events，以支持 Agent 工具调用可视化输出
-        async for event in _chain.astream_events(
-            {"input": message, "history": history},
+        async for event in _chain.astream_events({
+                "input": message, 
+                "history": history,
+                "current_time": datetime.datetime.now().strftime("%Y年%m月%d日 %A")
+            },
             version="v2"
         ):
             kind = event["event"]

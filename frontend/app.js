@@ -20,6 +20,8 @@ const state = {
     sessions: new Map(), // sessionId -> { messages: [], title: '' }
     isStreaming: false,
     serverOnline: false,
+    uploadedContext: '', // 保存已上传解析的文本
+    attachedFile: null,  // { filename, fileUrl, markdown } 当前会话的附件
 };
 
 // ============================================================
@@ -39,6 +41,8 @@ const dom = {
     modelInfo: $('#modelInfo'),
     sidebar: $('#sidebar'),
     menuBtn: $('#menuBtn'),
+    filePreview: $('#filePreview'),
+    fileUploadInput: $('#fileUploadInput'),
 };
 
 // ============================================================
@@ -154,9 +158,7 @@ function renderMarkdown(text) {
 function createMessageElement(role, content) {
     const div = document.createElement('div');
     div.className = `message ${role}`;
-
     const avatarText = role === 'ai' ? '峰' : '👤';
-
     div.innerHTML = `
         <div class="message-avatar">${avatarText}</div>
         <div class="message-content">
@@ -165,7 +167,20 @@ function createMessageElement(role, content) {
             </div>
         </div>
     `;
+    return div;
+}
 
+// 创建包含原始 HTML 的消息气泡（用来展示带链接的用户消息）
+function createMessageElementRaw(role, innerHtml) {
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    const avatarText = role === 'ai' ? '峰' : '👤';
+    div.innerHTML = `
+        <div class="message-avatar">${avatarText}</div>
+        <div class="message-content">
+            <div class="message-bubble">${innerHtml}</div>
+        </div>
+    `;
     return div;
 }
 
@@ -205,9 +220,25 @@ function scrollToBottom() {
 // ============================================================
 
 async function sendMessage(text) {
-    if (!text.trim() || state.isStreaming) return;
+    if (!text.trim() && !state.uploadedContext) return;
+    if (state.isStreaming) return;
 
-    const message = text.trim();
+    let message = text.trim();
+    let displayHtml = escapeHtml(message) || '';
+
+    // 如果有附带文档：解析内容暗中注入给 AI，但用户看到的只是一个链接徽章
+    if (state.uploadedContext && state.attachedFile) {
+        message = state.uploadedContext + "【基于以上资料，我要问的是】：\n" + (text.trim() || '请分析此文件');
+        const linkHtml = `<a href="${state.attachedFile.fileUrl}" target="_blank" style="color:#4a9eff; text-decoration:none; display:inline-flex; align-items:center; gap:3px; background:rgba(74,158,255,0.1); padding:2px 8px; border-radius:4px; font-size:13px; margin-bottom:4px;">📎 ${escapeHtml(state.attachedFile.filename)}</a>`;
+        displayHtml = linkHtml + (text.trim() ? '<br>' + escapeHtml(text.trim()) : '');
+        clearUploadedFile(); // 发送后清除输入框旁的附件徽标
+    } else if (state.uploadedContext) {
+        message = state.uploadedContext + "【基于以上资料，我要问的是】：\n" + (text.trim() || '请分析此文件');
+        clearUploadedFile();
+    }
+
+    if (!message) return;
+
     dom.messageInput.value = '';
     autoResizeTextarea();
     updateSendButton();
@@ -220,13 +251,13 @@ async function sendMessage(text) {
         const newId = generateId();
         state.currentSessionId = newId;
         
-        // 重要修复：当创建全新聊天时，清空之前遗留在 DOM 里被隐藏的旧气泡！
         dom.chatMessages.innerHTML = '';
         localStorage.setItem('currentSessionId', newId);
 
+        const titleText = text.trim() || (state.attachedFile ? state.attachedFile.filename : '新对话');
         state.sessions.set(newId, {
             messages: [],
-            title: message.substring(0, 20) + (message.length > 20 ? '...' : ''),
+            title: titleText.substring(0, 20) + (titleText.length > 20 ? '...' : ''),
             createdAt: Date.now(),
         });
         renderSessionsList();
@@ -234,9 +265,9 @@ async function sendMessage(text) {
 
     const session = state.sessions.get(state.currentSessionId);
 
-    // 添加用户消息
+    // 添加用户消息（存储完整内容，显示简洁版）
     session.messages.push({ role: 'user', content: message });
-    const userMsg = createMessageElement('user', message);
+    const userMsg = createMessageElementRaw('user', displayHtml);
     dom.chatMessages.appendChild(userMsg);
     scrollToBottom();
 
@@ -443,8 +474,33 @@ function autoResizeTextarea() {
 
 function updateSendButton() {
     const hasText = dom.messageInput.value.trim().length > 0;
-    dom.sendBtn.disabled = !hasText || state.isStreaming;
+    const hasFile = state.uploadedContext.length > 0;
+    dom.sendBtn.disabled = (!hasText && !hasFile) || state.isStreaming;
 }
+
+// 渲染持久化的附件徽标（始终贴在输入框旁）
+function renderFileBadge() {
+    if (!state.attachedFile) {
+        dom.filePreview.style.display = 'none';
+        return;
+    }
+    const f = state.attachedFile;
+    dom.filePreview.style.display = 'flex';
+    dom.filePreview.innerHTML = `
+        <a href="${f.fileUrl}" target="_blank" style="color:inherit; text-decoration:none; display:flex; align-items:center; gap:4px;">
+            📄 <span style="text-decoration:underline;">${f.filename}</span>
+        </a>
+        <button style="background:none; border:none; color:#888; cursor:pointer; margin-left:6px; font-size:14px;" onclick="clearUploadedFile()">✖</button>
+    `;
+}
+
+// 暴露全局清除函数
+window.clearUploadedFile = function() {
+    state.uploadedContext = '';
+    state.attachedFile = null;
+    dom.filePreview.style.display = 'none';
+    updateSendButton();
+};
 
 // ============================================================
 // 工具函数
@@ -499,6 +555,41 @@ async function init() {
     dom.newChatBtn.addEventListener('click', () => {
         showWelcomeView();
         closeSidebar();
+    });
+
+    // 附件处理逻辑
+    dom.fileUploadInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        dom.filePreview.style.display = 'flex';
+        dom.filePreview.innerHTML = `<span>⏳ 正在全自动读取解析 ${file.name}...</span>`;
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        try {
+            const res = await fetch(`${API_BASE}/upload`, {
+                method: 'POST',
+                body: formData
+            });
+            const data = await res.json();
+            if (res.ok && data.markdown) {
+                state.uploadedContext = `【以下为用户提供的附件资料：${data.filename}】\n---\n` + data.markdown + `\n---\n\n`;
+                state.attachedFile = {
+                    filename: data.filename,
+                    fileUrl: data.file_url || '#',
+                    markdown: data.markdown,
+                };
+                renderFileBadge();
+                updateSendButton();
+            } else {
+                dom.filePreview.innerHTML = `<span>❌ 解析被拒: ${data.detail || '格式暂不支持'}</span> <button style="background:none; border:none; color:inherit; cursor:pointer;" onclick="clearUploadedFile()">✖</button>`;
+            }
+        } catch(err) {
+            dom.filePreview.innerHTML = `<span>❌ 网络故障: ${err.message}</span> <button style="background:none; border:none; color:inherit; cursor:pointer;" onclick="clearUploadedFile()">✖</button>`;
+        }
+        dom.fileUploadInput.value = '';
     });
 
     // 预设问题卡片
