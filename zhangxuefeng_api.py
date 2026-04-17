@@ -202,12 +202,49 @@ def create_llm(backend: str = "ollama", model: str = None):
 
 
 def build_chain(llm, system_prompt: str):
+    from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+    from langchain_community.tools.tavily_search import TavilySearchResults
+
+    tools = []
+    tavily_api_key = os.getenv("TAVILY_API_KEY")
+    
+    if tavily_api_key:
+        # 添加全网搜索实时验证武器
+        tools.append(TavilySearchResults(max_results=3, tavily_api_key=tavily_api_key))
+        logger.info("✅ 已挂载 Tavily 强力搜索网关，大模型现已具备全网实时获取最新分数线/招生资讯的能力！")
+        
+        system_prompt += (
+            "\n\n【极其重要的指令】：\n"
+            "当你遇到需要最新数据（如具体某年大学的分数线、招生变动、新录取规定、实时国家政策）时，"
+            "**绝对不准**使用你记忆里可能过时的数据去瞎编或者估算！\n"
+            "你必须立即调用搜索工具 `tavily_search_results_json` 在全网查询最新权威结果！"
+            "\n如果未提供工具，则尽力依靠常识作答。"
+        )
+
+    # Agent 需要特定的 Scratchpad 以存放中间步骤
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         MessagesPlaceholder(variable_name="history"),
         ("user", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
     ])
-    return prompt | llm
+
+    if tools:
+        # 当具备工具时，将其包装为智能体执行器
+        try:
+            agent = create_tool_calling_agent(llm, tools, prompt)
+            return AgentExecutor(agent=agent, tools=tools, verbose=True)
+        except Exception as e:
+            logger.error(f"代理挂载失败，降级为普通链式模式: {e}")
+            
+    # 如果没配置 Tavily 密钥或者失败，这只是一个普通链
+    # 但如果是普通链，我们需要去掉 agent_scratchpad 参数才能正常跑
+    prompt_safe = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder(variable_name="history"),
+        ("user", "{input}"),
+    ])
+    return prompt_safe | llm
 
 
 # ============================================================
@@ -275,8 +312,8 @@ def create_app(backend: str = "ollama", model: str = None, skill_path: str = Non
         llm = create_llm(actual_backend, model_name)
         
         # 添加高可用回退机制：如果主模型挂掉，自动无缝切换到备用模型
-        fallback_backend = "bailian" if actual_backend == "ollama" else "ollama"
-        fallback_model = "qwen-turbo" if fallback_backend == "bailian" else "qwen:7b" 
+        fallback_backend = "bailian"
+        fallback_model = "qwen3.6-35b-a3b"
         try:
             fallback_llm = create_llm(fallback_backend, fallback_model)
             llm = llm.with_fallbacks([fallback_llm])
@@ -372,7 +409,14 @@ def register_routes(app: FastAPI):
                 "input": req.message,
                 "history": history,
             })
-            reply = result.content if hasattr(result, "content") else str(result)
+            
+            # Agent返回的是dict带output，普通链返回的是AIMessage
+            if isinstance(result, dict) and "output" in result:
+                reply = result["output"]
+            elif hasattr(result, "content"):
+                reply = result.content
+            else:
+                reply = str(result)
         except Exception as e:
             logger.error(f"模型调用异常 (ainvoke): {str(e)}")
             raise HTTPException(status_code=500, detail=f"模型调用失败: {str(e)}")
@@ -435,15 +479,27 @@ async def _stream_response(message: str, session_id: str, history: list):
     yield f"data: {json.dumps({'type': 'session', 'session_id': session_id}, ensure_ascii=False)}\n\n"
 
     try:
-        # 使用异步数据流 astream
-        async for chunk in _chain.astream({
-            "input": message,
-            "history": history,
-        }):
-            text = chunk.content if hasattr(chunk, "content") else str(chunk)
-            if text:
-                full_response += text
-                yield f"data: {json.dumps({'type': 'content', 'text': text}, ensure_ascii=False)}\n\n"
+        # 使用异步事件流 astream_events，以支持 Agent 工具调用可视化输出
+        async for event in _chain.astream_events(
+            {"input": message, "history": history},
+            version="v2"
+        ):
+            kind = event["event"]
+            if kind == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                if hasattr(chunk, "content") and chunk.content:
+                    text = chunk.content
+                    # 避免流出思考符号（如果带有）
+                    if isinstance(text, str):
+                        full_response += text
+                        yield f"data: {json.dumps({'type': 'content', 'text': text}, ensure_ascii=False)}\n\n"
+            elif kind == "on_tool_start":
+                tool_name = event['name']
+                query_dict = event['data'].get('input', {})
+                query_str = query_dict.get('query', str(query_dict)) if isinstance(query_dict, dict) else str(query_dict)
+                msg = f"\n> 🔍 [老张正在全网检索: {tool_name}] 分析关键词：{query_str}...\n\n"
+                full_response += msg
+                yield f"data: {json.dumps({'type': 'content', 'text': msg}, ensure_ascii=False)}\n\n"
     except Exception as e:
         logger.error(f"模型流式输出异常: {str(e)}")
         yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
