@@ -1,0 +1,464 @@
+"""
+张雪峰视角智能体 API (生产级版本)
+========================================
+功能：REST API + SSE 流式输出，支持 SQLite 记忆持久化、异步请求、API 防护。
+"""
+
+import os
+import sys
+import io
+import re
+import uuid
+import json
+import sqlite3
+import argparse
+import logging
+from pathlib import Path
+from typing import Optional
+from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Security, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage, messages_to_dict, messages_from_dict
+
+
+# ============================================================
+# 初始化配置与日志
+# ============================================================
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("ZhangXuefengAPI")
+
+# ============================================================
+# 持久化会话管理 (SQLite)
+# ============================================================
+class SessionManager:
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    messages TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+
+    def get_session(self, session_id: str) -> list:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT messages FROM sessions WHERE session_id = ?", (session_id,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                try:
+                    msgs_dict = json.loads(row[0])
+                    return messages_from_dict(msgs_dict)
+                except Exception as e:
+                    logger.error(f"解析会话 {session_id} 历史失败: {e}")
+            return []
+
+    def save_session(self, session_id: str, history: list):
+        # 限制历史长度
+        if len(history) > 20:
+            history = history[-20:]
+        try:
+            msgs_dict = messages_to_dict(history)
+            msgs_json = json.dumps(msgs_dict, ensure_ascii=False)
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT INTO sessions (session_id, messages, updated_at) 
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(session_id) DO UPDATE SET 
+                        messages=excluded.messages,
+                        updated_at=CURRENT_TIMESTAMP
+                ''', (session_id, msgs_json))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"保存会话 {session_id} 失败: {e}")
+
+    def get_all_sessions(self) -> list:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT session_id, messages FROM sessions ORDER BY updated_at DESC")
+            return cursor.fetchall()
+
+    def delete_session(self, session_id: str):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            conn.commit()
+
+    def clear_all(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM sessions")
+            conn.commit()
+
+
+# ============================================================
+# 全局状态
+# ============================================================
+_chain = None
+_info: dict = {}
+_session_manager: SessionManager = None
+
+
+# ============================================================
+# 安全机制：API 鉴权
+# ============================================================
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip()
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+http_bearer = HTTPBearer(auto_error=False)
+
+async def verify_api_key(
+    api_key: Optional[str] = Security(api_key_header),
+    bearer: Optional[HTTPAuthorizationCredentials] = Security(http_bearer)
+):
+    if not API_SECRET_KEY:  # 如果没设置，则放行
+        return True
+    
+    token = api_key or (bearer.credentials if bearer else None)
+    if not token or token != API_SECRET_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized. 请提供正确的 X-API-Key 头部或 Bearer Token",
+        )
+    return True
+
+
+# ============================================================
+# 1. SKILL.md 加载
+# ============================================================
+def load_skill_as_system_prompt(skill_path: str = None) -> str:
+    if skill_path is None:
+        project_root = Path(__file__).parent
+        skill_path = project_root / ".agents" / "skills" / "zhangxuefeng-perspective" / "SKILL.md"
+
+    skill_path = Path(skill_path)
+    if not skill_path.exists():
+        raise FileNotFoundError(f"找不到 SKILL.md: {skill_path}")
+
+    raw_bytes = skill_path.read_bytes()
+    if raw_bytes.startswith(b'\xef\xbb\xbf'):
+        raw_bytes = raw_bytes[3:]
+
+    content = raw_bytes.decode("utf-8", errors="replace")
+    content = re.sub(r'[\ud800-\udfff]', '', content)
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            content = parts[2].strip()
+
+    return content
+
+
+# ============================================================
+# 2. LLM 工厂
+# ============================================================
+def create_llm(backend: str = "ollama", model: str = None):
+    if backend == "ollama":
+        from langchain_ollama.chat_models import ChatOllama
+        return ChatOllama(
+            model=model or "qwen3:8b",
+            temperature=0.7,
+            num_ctx=8192,
+        )
+    elif backend == "bailian":
+        from langchain_openai import ChatOpenAI
+        from pydantic import SecretStr
+
+        api_key = os.getenv("DASHSCOPE_API_KEY")
+        if not api_key:
+            raise ValueError("请设置环境变量 DASHSCOPE_API_KEY")
+
+        return ChatOpenAI(
+            model=model or "qwen3.5-397b-a17b",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_key=SecretStr(api_key),
+            temperature=0.7,
+        )
+    else:
+        raise ValueError(f"不支持的 backend: {backend}")
+
+
+def build_chain(llm, system_prompt: str):
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder(variable_name="history"),
+        ("user", "{input}"),
+    ])
+    return prompt | llm
+
+
+# ============================================================
+# 3. 请求/响应模型 (加强验证)
+# ============================================================
+class ChatRequest(BaseModel):
+    message: str = Field(..., max_length=2000, description="用户消息")
+    session_id: Optional[str] = Field(None, pattern=r"^[a-zA-Z0-9_-]{1,50}$", description="会话ID，限50个字母数字或横线")
+    stream: bool = Field(False, description="是否使用流式输出(SSE)")
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    session_id: str
+
+
+class SessionInfo(BaseModel):
+    session_id: str
+    message_count: int
+    last_message: Optional[str] = None
+
+
+class ServerInfo(BaseModel):
+    name: str = "张雪峰视角智能体 API (生产级)"
+    version: str = "1.1.0"
+    backend: str
+    model: str
+    system_prompt_length: int
+    status: str = "ok"
+
+
+# ============================================================
+# 4. FastAPI 应用构建
+# ============================================================
+def create_app(backend: str = "ollama", model: str = None, skill_path: str = None) -> FastAPI:
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        global _chain, _info, _session_manager
+
+        # 初始化会话管理类，若未配置环境变量使用默认路径 ./data/sessions.db
+        db_path = os.getenv("SESSION_DB_PATH", "./data/sessions.db")
+        _session_manager = SessionManager(db_path)
+        logger.info(f"会话持久化存储已连接: {db_path}")
+
+        # 使用配置文件读取，如果命令行没传，使用 .env 的值
+        actual_backend = backend or os.getenv("BACKEND", "ollama")
+        actual_model = model or os.getenv("MODEL_NAME")
+
+        system_prompt = load_skill_as_system_prompt(skill_path)
+        
+        default_model = "qwen3:8b" if actual_backend == "ollama" else "qwen3.5-397b-a17b"
+        model_name = actual_model or default_model
+        
+        llm = create_llm(actual_backend, model_name)
+        _chain = build_chain(llm, system_prompt)
+
+        _info.update({
+            "backend": actual_backend,
+            "model": model_name,
+            "system_prompt_length": len(system_prompt),
+        })
+
+        logger.info(f"SKILL.md 已加载 ({len(system_prompt)} 字符)")
+        logger.info(f"模型后端连接成功: {actual_backend} / {model_name}")
+        if API_SECRET_KEY:
+            logger.info("API 鉴权已开启")
+        else:
+            logger.warning("API 鉴权未开启！生产环境请配置 API_SECRET_KEY")
+
+        yield
+
+        logger.info("API 服务已清理关闭")
+
+    app = FastAPI(
+        title="张雪峰视角智能体 API",
+        description="企业级 AI 对话服务接口",
+        version="1.1.0",
+        lifespan=lifespan,
+    )
+
+    # 严格读取 CORS_ORIGINS
+    cors_str = os.getenv("CORS_ORIGINS", "*")
+    origins = [o.strip() for o in cors_str.split(",")] if cors_str else []
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True if "*" not in origins else False, # 开启凭据不允许出现通配符 *
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    return app
+
+app = FastAPI(title="placeholder")
+
+
+# ============================================================
+# 5. API 路由
+# ============================================================
+def register_routes(app: FastAPI):
+
+    @app.get("/health", response_model=ServerInfo, tags=["系统"])
+    async def health_check():
+        """健康检查，K8s 探针适用"""
+        return ServerInfo(
+            backend=_info.get("backend", "unknown"),
+            model=_info.get("model", "unknown"),
+            system_prompt_length=_info.get("system_prompt_length", 0),
+            status="ok"
+        )
+
+    @app.get("/", response_model=ServerInfo, tags=["系统"])
+    async def get_info(authorized: bool = Depends(verify_api_key)):
+        """获取服务器信息"""
+        return await health_check()
+
+    @app.post("/chat", response_model=ChatResponse, tags=["对话"])
+    async def chat(req: ChatRequest, authorized: bool = Depends(verify_api_key)):
+        if _chain is None:
+            raise HTTPException(status_code=503, detail="模型尚未初始化")
+
+        session_id = req.session_id or str(uuid.uuid4())[:8]
+        history = _session_manager.get_session(session_id)
+
+        if req.stream:
+            return StreamingResponse(
+                _stream_response(req.message, session_id, history),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Session-Id": session_id,
+                },
+            )
+
+        try:
+            # 异步非阻塞调用 (ainvoke)
+            result = await _chain.ainvoke({
+                "input": req.message,
+                "history": history,
+            })
+            reply = result.content if hasattr(result, "content") else str(result)
+        except Exception as e:
+            logger.error(f"模型调用异常 (ainvoke): {str(e)}")
+            raise HTTPException(status_code=500, detail=f"模型调用失败: {str(e)}")
+
+        history.append(HumanMessage(content=req.message))
+        history.append(AIMessage(content=reply))
+        
+        # 保存持久化历史记录
+        _session_manager.save_session(session_id, history)
+
+        return ChatResponse(reply=reply, session_id=session_id)
+
+    @app.get("/sessions", response_model=list[SessionInfo], tags=["会话管理"])
+    async def list_sessions(authorized: bool = Depends(verify_api_key)):
+        result = []
+        rows = _session_manager.get_all_sessions()
+        for sid, msgs_json in rows:
+            last_msg = None
+            try:
+                msgs = messages_from_dict(json.loads(msgs_json))
+                for m in reversed(msgs):
+                    if isinstance(m, HumanMessage):
+                        last_msg = m.content[:50]
+                        break
+                result.append(SessionInfo(
+                    session_id=sid,
+                    message_count=len(msgs),
+                    last_message=last_msg,
+                ))
+            except Exception:
+                pass
+        return result
+
+    @app.delete("/sessions/{session_id}", tags=["会话管理"])
+    async def delete_session(session_id: str, authorized: bool = Depends(verify_api_key)):
+        _session_manager.delete_session(session_id)
+        return {"message": f"会话 {session_id} 已删除"}
+
+    @app.delete("/sessions", tags=["会话管理"])
+    async def clear_sessions(authorized: bool = Depends(verify_api_key)):
+        _session_manager.clear_all()
+        return {"message": "已清空所有会话"}
+
+
+async def _stream_response(message: str, session_id: str, history: list):
+    full_response = ""
+    yield f"data: {json.dumps({'type': 'session', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+    try:
+        # 使用异步数据流 astream
+        async for chunk in _chain.astream({
+            "input": message,
+            "history": history,
+        }):
+            text = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if text:
+                full_response += text
+                yield f"data: {json.dumps({'type': 'content', 'text': text}, ensure_ascii=False)}\n\n"
+    except Exception as e:
+        logger.error(f"模型流式输出异常: {str(e)}")
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+        return
+
+    history.append(HumanMessage(content=message))
+    history.append(AIMessage(content=full_response))
+    _session_manager.save_session(session_id, history)
+    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+
+# ============================================================
+# 6. 主入口
+# ============================================================
+def main():
+    if sys.platform == "win32":
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(description="张雪峰视角智能体 API (生产级版本)")
+    parser.add_argument("--backend", choices=["ollama", "bailian"], default=None)
+    parser.add_argument("--model", type=str, default=None)
+    parser.add_argument("--skill-path", type=str, default=None)
+    parser.add_argument("--host", type=str, default=None)
+    parser.add_argument("--port", type=int, default=None)
+    args = parser.parse_args()
+
+    host = args.host or os.getenv("API_HOST", "0.0.0.0")
+    port = args.port or int(os.getenv("API_PORT", "8000"))
+
+    real_app = create_app(
+        backend=args.backend,
+        model=args.model,
+        skill_path=args.skill_path,
+    )
+    register_routes(real_app)
+
+    frontend_dir = Path(__file__).parent / "frontend"
+    if frontend_dir.exists():
+        @real_app.get("/app", include_in_schema=False)
+        async def serve_frontend():
+            return FileResponse(frontend_dir / "index.html")
+
+        real_app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="frontend")
+
+    import uvicorn
+    print("\n" + "=" * 60)
+    print("  张雪峰视角智能体 API (生产级开启)")
+    print(f"  地址: http://{host}:{port}")
+    print(f"  前端页面: http://localhost:{port}/app")
+    print(f"  健康检查: http://localhost:{port}/health")
+    print("=" * 60 + "\n")
+
+    uvicorn.run(real_app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()

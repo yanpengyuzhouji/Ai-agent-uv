@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "zhangxuefeng-perspective": {
+      "source": "alchaincyf/zhangxuefeng-skill",
+      "sourceType": "github",
+      "computedHash": "04febd70c51ec09fc23014672daba14221d3ed43801b3acab6b71a2b49cd656b"
+    }
+  }
+}
