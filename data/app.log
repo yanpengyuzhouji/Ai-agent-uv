@@ -1,0 +1,42 @@
+2026-04-17 16:15:37,249 - ZhangXuefengAPI - INFO - 会话持久化存储已连接: ./data/sessions.db
+2026-04-17 16:15:43,493 - ZhangXuefengAPI - INFO - 开启高可用回退机制 (Fallback): bailian / qwen-turbo
+2026-04-17 16:15:43,494 - ZhangXuefengAPI - INFO - SKILL.md 已加载 (7457 字符)
+2026-04-17 16:15:43,494 - ZhangXuefengAPI - INFO - 模型后端连接成功: ollama / qwen3:8b
+2026-04-17 16:15:43,494 - ZhangXuefengAPI - WARNING - API 鉴权未开启！生产环境请配置 API_SECRET_KEY
+2026-04-17 16:16:03,664 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 200 OK"
+2026-04-17 16:17:22,591 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:17:23,712 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 401 Unauthorized"
+2026-04-17 16:17:23,714 - ZhangXuefengAPI - ERROR - 模型流式输出异常:  (status code: 502)
+2026-04-17 16:21:53,273 - ZhangXuefengAPI - INFO - API 服务已清理关闭
+2026-04-17 16:26:16,472 - ZhangXuefengAPI - INFO - 会话持久化存储已连接: ./data/sessions.db
+2026-04-17 16:26:22,971 - ZhangXuefengAPI - INFO - 开启高可用回退机制 (Fallback): bailian / qwen-turbo
+2026-04-17 16:26:22,971 - ZhangXuefengAPI - INFO - SKILL.md 已加载 (7457 字符)
+2026-04-17 16:26:22,971 - ZhangXuefengAPI - INFO - 模型后端连接成功: ollama / qwen3:8b
+2026-04-17 16:26:22,971 - ZhangXuefengAPI - WARNING - API 鉴权未开启！生产环境请配置 API_SECRET_KEY
+2026-04-17 16:26:32,566 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:26:33,676 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 401 Unauthorized"
+2026-04-17 16:26:33,676 - ZhangXuefengAPI - ERROR - 模型流式输出异常:  (status code: 502)
+2026-04-17 16:28:03,864 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:28:04,739 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 401 Unauthorized"
+2026-04-17 16:28:04,739 - ZhangXuefengAPI - ERROR - 模型流式输出异常:  (status code: 502)
+2026-04-17 16:28:30,640 - ZhangXuefengAPI - INFO - 会话持久化存储已连接: ./data/sessions.db
+2026-04-17 16:28:36,739 - ZhangXuefengAPI - INFO - 开启高可用回退机制 (Fallback): bailian / qwen-turbo
+2026-04-17 16:28:36,740 - ZhangXuefengAPI - INFO - SKILL.md 已加载 (7457 字符)
+2026-04-17 16:28:36,740 - ZhangXuefengAPI - INFO - 模型后端连接成功: ollama / qwen3:8b
+2026-04-17 16:28:36,740 - ZhangXuefengAPI - WARNING - API 鉴权未开启！生产环境请配置 API_SECRET_KEY
+2026-04-17 16:28:57,835 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:28:58,653 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-17 16:30:06,531 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:30:07,719 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-17 16:30:30,383 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:30:31,543 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-17 16:30:39,686 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:30:40,272 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-17 16:31:24,274 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:31:24,936 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-17 16:32:33,003 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 16:32:33,699 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-17 18:14:56,053 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 18:14:57,237 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-17 18:15:46,945 - httpx - INFO - HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 502 Bad Gateway"
+2026-04-17 18:15:47,797 - httpx - INFO - HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"

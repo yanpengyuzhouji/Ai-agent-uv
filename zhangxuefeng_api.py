@@ -34,9 +34,15 @@ from langchain_core.messages import HumanMessage, AIMessage, messages_to_dict, m
 # ============================================================
 load_dotenv()
 
+Path("./data").mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("./data/app.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger("ZhangXuefengAPI")
 
@@ -224,6 +230,16 @@ class SessionInfo(BaseModel):
     last_message: Optional[str] = None
 
 
+class MessageInfo(BaseModel):
+    role: str
+    content: str
+
+
+class SessionDetail(BaseModel):
+    session_id: str
+    messages: list[MessageInfo]
+
+
 class ServerInfo(BaseModel):
     name: str = "张雪峰视角智能体 API (生产级)"
     version: str = "1.1.0"
@@ -257,6 +273,17 @@ def create_app(backend: str = "ollama", model: str = None, skill_path: str = Non
         model_name = actual_model or default_model
         
         llm = create_llm(actual_backend, model_name)
+        
+        # 添加高可用回退机制：如果主模型挂掉，自动无缝切换到备用模型
+        fallback_backend = "bailian" if actual_backend == "ollama" else "ollama"
+        fallback_model = "qwen-turbo" if fallback_backend == "bailian" else "qwen:7b" 
+        try:
+            fallback_llm = create_llm(fallback_backend, fallback_model)
+            llm = llm.with_fallbacks([fallback_llm])
+            logger.info(f"开启高可用回退机制 (Fallback): {fallback_backend} / {fallback_model}")
+        except Exception as e:
+            logger.warning(f"未能配置模型回退容灾机制 (若需要请确保另一个后端的变量正确): {e}")
+
         _chain = build_chain(llm, system_prompt)
 
         _info.update({
@@ -378,6 +405,19 @@ def register_routes(app: FastAPI):
             except Exception:
                 pass
         return result
+
+    @app.get("/sessions/{session_id}", response_model=SessionDetail, tags=["会话管理"])
+    async def get_session_detail(session_id: str, authorized: bool = Depends(verify_api_key)):
+        history = _session_manager.get_session(session_id)
+        if not history:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        
+        out_msgs = []
+        for msg in history:
+            role = "user" if isinstance(msg, HumanMessage) else "ai"
+            out_msgs.append(MessageInfo(role=role, content=msg.content))
+            
+        return SessionDetail(session_id=session_id, messages=out_msgs)
 
     @app.delete("/sessions/{session_id}", tags=["会话管理"])
     async def delete_session(session_id: str, authorized: bool = Depends(verify_api_key)):

@@ -16,7 +16,7 @@ const API_BASE = window.location.origin;
 // ============================================================
 
 const state = {
-    currentSessionId: null,
+    currentSessionId: localStorage.getItem('currentSessionId') || null,
     sessions: new Map(), // sessionId -> { messages: [], title: '' }
     isStreaming: false,
     serverOnline: false,
@@ -88,6 +88,35 @@ async function deleteSessionAPI(sessionId) {
     } catch {
         // 忽略
     }
+}
+
+async function loadSessionsListAPI() {
+    try {
+        const resp = await fetch(`${API_BASE}/sessions`);
+        if (resp.ok) {
+            const list = await resp.json();
+            list.forEach(s => {
+                if (!state.sessions.has(s.session_id)) {
+                    state.sessions.set(s.session_id, {
+                        messages: [],
+                        title: s.last_message || '旧会话'
+                    });
+                }
+            });
+        }
+    } catch {}
+}
+
+async function loadSessionDetailAPI(sessionId) {
+    try {
+        const resp = await fetch(`${API_BASE}/sessions/${sessionId}`);
+        if (resp.ok) {
+            const detail = await resp.json();
+            const session = state.sessions.get(sessionId) || { title: '会话' };
+            session.messages = detail.messages;
+            state.sessions.set(sessionId, session);
+        }
+    } catch {}
 }
 
 // ============================================================
@@ -190,6 +219,11 @@ async function sendMessage(text) {
     if (!state.currentSessionId) {
         const newId = generateId();
         state.currentSessionId = newId;
+        
+        // 重要修复：当创建全新聊天时，清空之前遗留在 DOM 里被隐藏的旧气泡！
+        dom.chatMessages.innerHTML = '';
+        localStorage.setItem('currentSessionId', newId);
+
         state.sessions.set(newId, {
             messages: [],
             title: message.substring(0, 20) + (message.length > 20 ? '...' : ''),
@@ -316,6 +350,7 @@ function showWelcomeView() {
     dom.welcomeScreen.style.display = 'flex';
     dom.chatMessages.classList.remove('active');
     state.currentSessionId = null;
+    localStorage.removeItem('currentSessionId');
     renderSessionsList();
 }
 
@@ -324,11 +359,17 @@ function showChatView() {
     dom.chatMessages.classList.add('active');
 }
 
-function loadSession(sessionId) {
-    const session = state.sessions.get(sessionId);
+async function loadSession(sessionId) {
+    let session = state.sessions.get(sessionId);
+    if (!session || (!session.messages || session.messages.length === 0)) {
+        await loadSessionDetailAPI(sessionId);
+        session = state.sessions.get(sessionId);
+    }
+    
     if (!session) return;
 
     state.currentSessionId = sessionId;
+    localStorage.setItem('currentSessionId', sessionId);
     showChatView();
 
     // 渲染历史消息
@@ -360,22 +401,23 @@ function renderSessionsList() {
             <div class="session-icon">💬</div>
             <div class="session-info">
                 <div class="session-title">${escapeHtml(session.title || '新对话')}</div>
-                <div class="session-meta">${session.messages.length} 条消息</div>
+                <div class="session-meta">${session.messages ? session.messages.length : 0} 条消息</div>
             </div>
-            <button class="session-delete" title="删除会话">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button class="session-delete delete-btn" title="删除会话">
+                <svg class="delete-btn" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events: none;">
                     <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                 </svg>
             </button>
         `;
 
         div.addEventListener('click', (e) => {
-            if (e.target.closest('.session-delete')) return;
-            loadSession(id);
-            closeSidebar();
+            if (!e.target.classList.contains('delete-btn')) {
+                loadSession(id);
+                if (window.innerWidth <= 768) closeSidebar();
+            }
         });
 
-        div.querySelector('.session-delete').addEventListener('click', (e) => {
+        div.querySelector('.delete-btn').addEventListener('click', (e) => {
             e.stopPropagation();
             state.sessions.delete(id);
             deleteSessionAPI(id);
@@ -422,10 +464,18 @@ function closeSidebar() {
 // 初始化
 // ============================================================
 
-function init() {
+async function init() {
     // 检查服务器
     checkServerStatus();
     setInterval(checkServerStatus, 15000);
+
+    // 获取远程历史记录
+    await loadSessionsListAPI();
+    if (state.currentSessionId && state.sessions.has(state.currentSessionId)) {
+        await loadSession(state.currentSessionId);
+    } else {
+        renderSessionsList();
+    }
 
     // 输入框事件
     dom.messageInput.addEventListener('input', () => {
